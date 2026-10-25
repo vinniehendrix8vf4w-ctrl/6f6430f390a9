@@ -1,0 +1,26 @@
+version: 2.1
+
+jobs:
+  test:
+    docker:
+      - image: cimg/base:current
+    resource_class: medium
+    steps:
+      - run:
+          name: Install dependencies
+          command: |
+            sudo apt-get update
+            sudo apt-get install -y cmake g++
+
+      - run:
+          name: Build and run RandomX tests
+          command: |
+            git clone --depth 1 https://github.com/tevador/RandomX.git /tmp/randomx
+            cmake -S /tmp/randomx -B /tmp/randomx/build -DARCH=x86-64 -DCMAKE_BUILD_TYPE=Release
+            cmake --build /tmp/randomx/build --target randomx-tests -j2
+            /tmp/randomx/build/randomx-tests
+
+workflows:
+  main:
+    jobs:
+      - test
